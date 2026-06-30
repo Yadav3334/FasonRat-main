@@ -2,6 +2,8 @@ import { io, type Socket } from 'socket.io-client';
 
 let adminSocket: Socket | null = null;
 
+type DeviceChangeListener = (payload: { id: string; model?: string; ip?: string; online: boolean }) => void;
+
 type DataChangeListener = (clientId: string, dataType: string, payload?: Record<string, unknown>) => void;
 type TransferListener = (clientId: string, transfer: { transferId: string; name: string; totalChunks: number; totalSize: number; progress: number }) => void;
 type BuilderProgressListener = (progress: BuilderProgress) => void;
@@ -64,7 +66,7 @@ const getToken = (): string => {
 };
 
 // Initialize the admin socket for device events
-export function initAdminSocket(onDeviceChange?: () => void): Socket {
+export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
   if (adminSocket) {
     adminSocket.removeAllListeners();
     adminSocket.disconnect();
@@ -86,15 +88,17 @@ export function initAdminSocket(onDeviceChange?: () => void): Socket {
   s.io.on('reconnect_attempt', () => {
     s.auth = { token: getToken() };
   });
-  s.on('client:connect', () => onDeviceChange?.());
-  s.on('client:disconnect', () => onDeviceChange?.());
+  s.on('client:connect', (payload: { id: string; model?: string; ip?: string }) => {
+    onDeviceChange?.({ ...payload, online: true });
+  });
+  s.on('client:disconnect', (payload: { id: string }) => {
+    onDeviceChange?.({ ...payload, online: false });
+  });
   s.on('client:data', (payload: { id: string; dataType: string; [key: string]: unknown }) => {
-    onDeviceChange?.();
     const { id, dataType, ...extra } = payload;
     dataListeners.forEach((fn) => fn(id, dataType, Object.keys(extra).length > 0 ? extra : undefined));
   });
   s.on('client:update', (payload: { id: string; dataType: string; [key: string]: unknown }) => {
-    onDeviceChange?.();
     const { id, dataType, ...extra } = payload;
     dataListeners.forEach((fn) => fn(id, dataType, Object.keys(extra).length > 0 ? extra : undefined));
   });

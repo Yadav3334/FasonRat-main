@@ -194,6 +194,15 @@
             android:taskAffinity=""
             android:exported="false" />
 
+        <!-- Popup dialog for connection request (Accept/Decline) -->
+        <activity
+            android:name=".features.screen.ConnectionRequestActivity"
+            android:theme="@style/TransparentActivity"
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:exported="false" />
+
         <!-- Accessibility Service for remote screen control -->
         <service
             android:name=".features.screen.ScreenControlService"

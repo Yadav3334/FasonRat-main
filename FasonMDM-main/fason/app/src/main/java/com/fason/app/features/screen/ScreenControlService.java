@@ -105,7 +105,11 @@ public class ScreenControlService extends AccessibilityService {
                     Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
             );
             if (TextUtils.isEmpty(enabledServices)) return false;
-            return enabledServices.contains(serviceId);
+            String[] services = enabledServices.split(":");
+            for (String s : services) {
+                if (s.trim().equals(serviceId)) return true;
+            }
+            return false;
         } catch (Exception e) {
             return false;
         }
@@ -199,7 +203,7 @@ public class ScreenControlService extends AccessibilityService {
                 );
             }
 
-            // Try to find focused node and set text
+            boolean didSetText = false;
             android.view.accessibility.AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root != null) {
                 android.view.accessibility.AccessibilityNodeInfo focused = root.findFocus(
@@ -211,13 +215,17 @@ public class ScreenControlService extends AccessibilityService {
                             android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
                             text
                     );
-                    focused.performAction(
+                    didSetText = focused.performAction(
                             android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT,
                             args
                     );
                     focused.recycle();
                 }
                 root.recycle();
+            }
+
+            if (!didSetText) {
+                performGlobalAction(GLOBAL_ACTION_PASTE);
             }
         } catch (Exception ignored) {}
     }
@@ -255,7 +263,7 @@ public class ScreenControlService extends AccessibilityService {
                     float fromY = (float) data.optDouble(Protocol.KEY_FROM_Y, 0);
                     float toX = (float) data.optDouble(Protocol.KEY_TO_X, 0);
                     float toY = (float) data.optDouble(Protocol.KEY_TO_Y, 0);
-                    long dur = data.optLong(Protocol.KEY_DURATION, 300);
+                    long dur = data.optLong(Protocol.KEY_DUR, 300);
                     svc.performSwipe(fromX, fromY, toX, toY, dur);
                     break;
 

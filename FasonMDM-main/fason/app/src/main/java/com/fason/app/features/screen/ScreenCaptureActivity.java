@@ -44,7 +44,13 @@ public class ScreenCaptureActivity extends Activity {
                 if (getIntent().getBooleanExtra("save_only", false)) {
                     ScreenCaptureService.saveProjectionResult(resultCode, data);
                 } else {
-                    ScreenCaptureService.getInstance().startCapture(resultCode, data);
+                    ScreenCaptureService svc = ScreenCaptureService.getInstance();
+                    if (svc != null) svc.startCapture(resultCode, data);
+                }
+            } else {
+                ScreenCaptureService svc = ScreenCaptureService.getInstance();
+                if (svc != null) {
+                    svc.stopCapture();
                 }
             }
         }

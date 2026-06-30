@@ -62,22 +62,14 @@ export default function GpsPage() {
     page: 'gps',
     extractData: (d) => ({
       locations: extractList<GpsLocation>(d.list).map((loc) => {
-        // Normalize time: could be ISO string, epoch millis number, or numeric string
         let timeStr = '';
         const rawTime = (loc as Record<string, unknown>).time ?? (loc as Record<string, unknown>).timestamp;
         if (rawTime) {
           if (typeof rawTime === 'number') {
-            // epoch millis from old data
             timeStr = new Date(rawTime).toLocaleString();
           } else if (typeof rawTime === 'string') {
-            // Could be ISO string or numeric string (epoch ms stored as string)
-            const asNum = Number(rawTime);
-            if (!isNaN(asNum) && rawTime.length > 8) {
-              timeStr = new Date(asNum).toLocaleString();
-            } else {
-              const parsed = new Date(rawTime);
-              timeStr = isNaN(parsed.getTime()) ? rawTime : parsed.toLocaleString();
-            }
+            const parsed = new Date(rawTime);
+            timeStr = isNaN(parsed.getTime()) ? rawTime : parsed.toLocaleString();
           }
         }
         return {
@@ -94,6 +86,7 @@ export default function GpsPage() {
     }),
     dataType: 'gps',
     defaultValue: { locations: [], interval: 0, deviceError: null },
+    socketDebounceMs: 1000,
   });
 
   const locations = rawData.locations;
@@ -109,7 +102,9 @@ export default function GpsPage() {
 
   const fetchGps = useCallback(async () => {
     await sendCommand(CMD.LOCATION);
-  }, [sendCommand]);
+    setTimeout(refresh, 3000);
+    setTimeout(refresh, 8000);
+  }, [sendCommand, refresh]);
 
   const startPolling = async () => {
     const val = parseInt(customInterval, 10);

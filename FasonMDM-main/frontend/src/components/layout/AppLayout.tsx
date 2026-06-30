@@ -10,16 +10,20 @@ import type { Socket } from 'socket.io-client';
 export default function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
-  const { fetchDashboard } = useDevicesStore();
+  const { onDeviceConnected, onDeviceDisconnected } = useDevicesStore();
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
     setMobileOpen(false);
   }, [location.pathname]);
 
-  const handleDeviceChange = useCallback(() => {
-    fetchDashboard();
-  }, [fetchDashboard]);
+  const handleDeviceChange = useCallback((payload: { id: string; model?: string; ip?: string; online: boolean }) => {
+    if (payload.online) {
+      onDeviceConnected(payload.id, payload.model, payload.ip);
+    } else {
+      onDeviceDisconnected(payload.id);
+    }
+  }, [onDeviceConnected, onDeviceDisconnected]);
 
   useEffect(() => {
     const s = initAdminSocket(handleDeviceChange);

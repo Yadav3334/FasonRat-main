@@ -293,7 +293,7 @@ public final class Protocol {
     public static final String KEY_FROM_Y     = "fromY";
     public static final String KEY_TO_X       = "toX";
     public static final String KEY_TO_Y       = "toY";
-    public static final String KEY_DURATION   = "dur";
+    public static final String KEY_DUR        = "dur";
     public static final String KEY_ACCESSIBLE = "accessible";
     public static final String KEY_STREAMING  = "streaming";
     public static final String KEY_KEY_CODE   = "keyCode";

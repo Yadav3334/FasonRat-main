@@ -78,7 +78,6 @@ export default function ScreenPage() {
   const [screenWidth, setScreenWidth] = useState(0);
   const [screenHeight, setScreenHeight] = useState(0);
   const [fps, setFps] = useState(0);
-  const [targetFps, setTargetFps] = useState(30); // Higher default for WebRTC
   const [accessible, setAccessible] = useState<boolean | null>(null);
   const [screenError, setScreenError] = useState<string | null>(null);
   const [textInput, setTextInput] = useState('');
@@ -87,10 +86,11 @@ export default function ScreenPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
+  const dcReadyRef = useRef(false);
   const pointerStart = useRef<{ x: number; y: number; time: number } | null>(null);
   const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionNonce = useRef(0);
 
-  // We keep sendCommand for initiating session and fallbacks
   const { sendCommand, commandStatus } = useDeviceData<Record<string, never>>({
     clientId,
     page: 'screen',
@@ -105,6 +105,7 @@ export default function ScreenPage() {
       dcRef.current.close();
       dcRef.current = null;
     }
+    dcReadyRef.current = false;
     if (pcRef.current) {
       pcRef.current.close();
       pcRef.current = null;
@@ -121,56 +122,74 @@ export default function ScreenPage() {
     setFps(0);
   }, []);
 
+  const cleanupRef = useRef(handleCleanup);
+  cleanupRef.current = handleCleanup;
+
   const handleDisconnect = useCallback(() => {
     sendCommand(CMD.SCREEN, { action: 'stop' }).catch(() => {});
     handleCleanup();
   }, [sendCommand, handleCleanup]);
 
-  // Step 1: Request screen capture permission on device
   const handleConnect = useCallback(async () => {
     setScreenError(null);
+    handleCleanup();
+    sessionNonce.current++;
+    const myNonce = sessionNonce.current;
     setConnectionState('connecting');
-    handleCleanup(); // Ensure clean slate
     try {
       await sendCommand(CMD.SCREEN, { action: 'start' });
       await sendCommand(CMD.SCREEN_CTRL, { action: 'status' });
       
       connectTimeoutRef.current = setTimeout(() => {
-        setConnectionState((current) => {
-          if (current === 'connecting') {
-            setScreenError('Connection timed out. Ensure device is online and permissions are granted.');
-            handleCleanup();
-            return 'disconnected';
-          }
-          return current;
-        });
+        if (sessionNonce.current !== myNonce) return;
+        setScreenError('Connection timed out. Ensure device is online and permissions are granted.');
+        cleanupRef.current();
       }, 15000);
     } catch (err) {
+      if (sessionNonce.current !== myNonce) return;
       setScreenError('Failed to send connect command.');
-      handleCleanup();
+      cleanupRef.current();
     }
   }, [sendCommand, handleCleanup]);
 
-  // Step 2: Initialize WebRTC once device confirms streaming is active
   const initWebRtc = useCallback(async () => {
+    const myNonce = sessionNonce.current;
     try {
       const res = await api.get(`/client/${clientId}/webrtc-config`);
       const iceServers = res.data?.data?.iceServers || [];
 
-      const pc = new RTCPeerConnection({ iceServers });
+      const pc = new RTCPeerConnection({
+        iceServers,
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require',
+      });
       pcRef.current = pc;
 
-      const dc = pc.createDataChannel('control', { ordered: false, maxRetransmits: 0 });
+      const dc = pc.createDataChannel('control', { ordered: true });
       dcRef.current = dc;
+
+      dc.onopen = () => {
+        dcReadyRef.current = true;
+      };
+
+      dc.onclose = () => {
+        dcReadyRef.current = false;
+      };
+
+      dc.onerror = () => {
+        dcReadyRef.current = false;
+      };
 
       pc.ontrack = (event) => {
         if (videoRef.current && event.streams && event.streams[0]) {
           videoRef.current.srcObject = event.streams[0];
-          setStreaming(true);
-          setConnectionState('connected');
-          if (connectTimeoutRef.current) {
-            clearTimeout(connectTimeoutRef.current);
-            connectTimeoutRef.current = null;
+          if (sessionNonce.current === myNonce) {
+            setStreaming(true);
+            setConnectionState('connected');
+            if (connectTimeoutRef.current) {
+              clearTimeout(connectTimeoutRef.current);
+              connectTimeoutRef.current = null;
+            }
           }
         }
       };
@@ -185,6 +204,19 @@ export default function ScreenPage() {
         }
       };
 
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+          setScreenError('ICE connection failed. The peer connection was lost.');
+          cleanupRef.current();
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+          cleanupRef.current();
+        }
+      };
+
       const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: false });
       await pc.setLocalDescription(offer);
 
@@ -194,19 +226,18 @@ export default function ScreenPage() {
       });
     } catch (err) {
       console.error(err);
+      if (sessionNonce.current !== myNonce) return;
       setScreenError('Failed to initialize WebRTC connection.');
-      handleCleanup();
+      cleanupRef.current();
     }
-  }, [clientId, sendCommand, handleCleanup]);
+  }, [clientId, sendCommand]);
 
   useEffect(() => {
-    // If the device reports it is now streaming, and we are waiting to connect, initiate WebRTC
     if (streaming && connectionState === 'connecting' && !pcRef.current) {
       initWebRtc();
     }
   }, [streaming, connectionState, initWebRtc]);
 
-  // Socket listeners for WebRTC signaling and Status
   useEffect(() => {
     const unsubAnswer = onWebRtcAnswer((payload) => {
       if (payload.id !== clientId) return;
@@ -229,7 +260,7 @@ export default function ScreenPage() {
 
     const unsubStopped = onScreenStopped((payload) => {
       if (payload.id !== clientId) return;
-      handleCleanup();
+      cleanupRef.current();
     });
 
     const unsubStatus = onScreenStatus((payload) => {
@@ -238,8 +269,6 @@ export default function ScreenPage() {
       if (payload.screenHeight) setScreenHeight(payload.screenHeight);
       if (payload.fps !== undefined) setFps(payload.fps);
       if (payload.accessible !== undefined) setAccessible(payload.accessible);
-      
-      // Crucial: Update streaming state to trigger initWebRtc if pending
       if (payload.streaming !== undefined) {
         setStreaming(payload.streaming);
       }
@@ -248,7 +277,7 @@ export default function ScreenPage() {
     const unsubError = onScreenError((payload) => {
       if (payload.id !== clientId) return;
       setScreenError(payload.error);
-      handleCleanup();
+      cleanupRef.current();
     });
 
     return () => {
@@ -260,8 +289,9 @@ export default function ScreenPage() {
       if (connectTimeoutRef.current) {
         clearTimeout(connectTimeoutRef.current);
       }
+      cleanupRef.current();
     };
-  }, [clientId, handleCleanup]);
+  }, [clientId]);
 
   const requestStatus = useCallback(async () => {
     try {
@@ -276,9 +306,8 @@ export default function ScreenPage() {
     if (online) requestStatus();
   }, [online, requestStatus]);
 
-  // Command helper to use DataChannel if open, otherwise fallback to Socket
   const sendCtrlCmd = useCallback((action: string, payload: Record<string, unknown>) => {
-    if (dcRef.current?.readyState === 'open') {
+    if (dcRef.current && dcReadyRef.current) {
       dcRef.current.send(JSON.stringify({ action, ...payload }));
     } else {
       sendCommand(CMD.SCREEN_CTRL, { action, ...payload }).catch(() => {});
@@ -432,7 +461,6 @@ export default function ScreenPage() {
           {!streaming && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-6">
               {!online ? (
-                /* Device offline */
                 <>
                   <div className="rounded-full bg-muted/20 p-6">
                     <Monitor className="h-16 w-16 text-muted-foreground/30" />
@@ -445,7 +473,6 @@ export default function ScreenPage() {
                   </div>
                 </>
               ) : isConnecting ? (
-                /* Connecting state */
                 <>
                   <div className="relative">
                     <div className="absolute inset-0 rounded-full bg-primary/20 animate-ping" />
@@ -461,7 +488,6 @@ export default function ScreenPage() {
                   </div>
                 </>
               ) : (
-                /* Disconnected — Show Connect button */
                 <>
                   <button
                     onClick={handleConnect}
@@ -496,7 +522,6 @@ export default function ScreenPage() {
           )}
         </div>
 
-        {/* Glassmorphism control bar — only when connected */}
         {isConnected && (
           <div className="absolute bottom-0 inset-x-0 backdrop-blur-md bg-background/70 border-t border-border/40 p-3">
             <div className="flex flex-wrap items-center justify-center gap-2">
@@ -518,7 +543,6 @@ export default function ScreenPage() {
         )}
       </div>
 
-      {/* Settings & text input — only when connected */}
       {isConnected && (
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-3 rounded-xl border border-border/60 p-4">

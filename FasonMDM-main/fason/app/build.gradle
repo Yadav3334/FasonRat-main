@@ -73,5 +73,5 @@ dependencies {
     implementation 'androidx.camera:camera-camera2:1.4.1'
     implementation 'androidx.camera:camera-lifecycle:1.4.1'
     implementation 'com.google.android.gms:play-services-location:21.3.0'
-    implementation 'org.webrtc:google-webrtc:1.0.32006'
+    implementation 'io.github.webrtc-sdk:android:125.6422.07'
 }

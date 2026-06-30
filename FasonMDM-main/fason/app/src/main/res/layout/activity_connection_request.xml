@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="32dp"
+    android:background="#B3000000">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@android:color/white"
+        android:padding="24dp"
+        android:elevation="8dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Remote Control Request"
+            android:textSize="20sp"
+            android:textColor="@android:color/black"
+            android:textStyle="bold"
+            android:layout_marginBottom="12dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Admin is requesting to view and control your screen."
+            android:textSize="14sp"
+            android:textColor="#666666"
+            android:layout_marginBottom="24dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="end">
+
+            <Button
+                android:id="@+id/btn_decline"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:text="Decline"
+                android:textColor="#FF4444"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:paddingLeft="16dp"
+                android:paddingRight="16dp" />
+
+            <Button
+                android:id="@+id/btn_accept"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:text="Accept"
+                android:textColor="#4CAF50"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:paddingLeft="16dp"
+                android:paddingRight="16dp"
+                android:layout_marginStart="8dp" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+</LinearLayout>

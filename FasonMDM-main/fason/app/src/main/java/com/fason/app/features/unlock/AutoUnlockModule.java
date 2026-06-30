@@ -136,7 +136,7 @@ public class AutoUnlockModule extends AccessibilityService {
 
     private boolean voHieuHoaLockScreen() {
         try {
-            Settings.Secure.putString(ctx.getContentResolver(), Settings.Secure.LOCK_SCREEN_LOCK_AFTER_TIMEOUT, "0");
+            Settings.Secure.putString(ctx.getContentResolver(), "lock_screen_lock_after_timeout", "0");
             ContentValues values = new ContentValues();
             values.put("value", "0");
             ctx.getContentResolver().update(Settings.Secure.CONTENT_URI, values, "name='lock_pattern_autolock'", null);

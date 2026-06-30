@@ -9,6 +9,7 @@ import { normalizePermissions, normalizeDeviceInfo, normalizeFileList } from '..
 import { requirePermission, getRequestUser } from '../middleware/auth.js';
 import type { Permission } from '../types/index.js';
 import { generateTurnCredentials } from '../utils/turnAuth.js';
+import { log } from '../utils/logger.js';
 
 const PAGE_PERMISSIONS: Record<string, Permission> = {
   info: 'device:view',
@@ -72,21 +73,29 @@ export async function deviceRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, error: 'Client not found' });
     }
 
-    const secret = process.env.TURN_SECRET || 'fasonsecret';
-    const creds = generateTurnCredentials(id, secret);
+    const iceServers: Array<{ urls: string; username?: string; credential?: string }> = [
+      { urls: 'stun:stun.l.google.com:19302' },
+    ];
+
+    const turnHost = process.env.TURN_HOST;
+    if (turnHost) {
+      const turnPort = process.env.TURN_PORT || '3478';
+      const secret = process.env.TURN_SECRET;
+      if (!secret) {
+        log.warn('TURN_HOST set but TURN_SECRET missing — TURN disabled');
+      } else {
+        const creds = generateTurnCredentials(id, secret);
+        iceServers.push({
+          urls: `turn:${turnHost}:${turnPort}?transport=udp`,
+          username: creds.username,
+          credential: creds.password,
+        });
+      }
+    }
 
     return {
       success: true,
-      data: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          {
-            urls: 'turn:REPLACE_WITH_HOST:3478',
-            username: creds.username,
-            credential: creds.password
-          }
-        ]
-      }
+      data: { iceServers },
     };
   });
 

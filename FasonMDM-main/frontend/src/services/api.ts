@@ -43,7 +43,7 @@ export const authApi = {
   updateProfile: (data: { username?: string; email?: string }) => api.post('/auth/update-profile', data),
 };
 
-export const dashboardApi = { getData: () => api.get('/dashboard') };
+export const dashboardApi = { getData: (config?: { signal?: AbortSignal }) => api.get('/dashboard', config) };
 
 export const clientsApi = {
   getAll: () => api.get('/clients'),

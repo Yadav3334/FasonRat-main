@@ -7,7 +7,7 @@ import android.content.Intent;
 import android.util.Log;
 
 import com.fason.app.features.screen.ScreenCaptureActivity;
-import com.fason.app.features.screen.ScreenCaptureService;
+import com.fason.app.core.network.SocketCommandRouter;
 
 public class ConnectionReceiver extends BroadcastReceiver {
     public static final String ACTION_ACCEPT = "com.fason.app.ACCEPT_CONNECTION";
@@ -35,7 +35,7 @@ public class ConnectionReceiver extends BroadcastReceiver {
         } else if (ACTION_REJECT.equals(intent.getAction())) {
             // Cancel and ensure it's not streaming
             try {
-                ScreenCaptureService.getInstance().stopCapture();
+                SocketCommandRouter.stopScreenCapture();
             } catch (Exception ignored) {}
         }
     }

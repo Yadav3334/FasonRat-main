@@ -35,6 +35,11 @@
 
 -keep class androidx.work.** { *; }
 
+# WebRTC
+-keep class org.webrtc.** { *; }
+-dontwarn org.webrtc.**
+-keep class com.fason.app.features.screen.** { *; }
+
 -optimizationpasses 5
 -dontusemixedcaseclassnames
 -dontskipnonpubliclibraryclasses

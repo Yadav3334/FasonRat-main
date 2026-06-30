@@ -24,6 +24,7 @@ import com.google.android.gms.location.Priority;
 import org.json.JSONObject;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class GpsManager {
 
@@ -32,7 +33,7 @@ public class GpsManager {
     private final LocationManager locMgr;
     private final AtomicBoolean tracking = new AtomicBoolean(false);
 
-    private Location lastLocation;
+    private volatile Location lastLocation;
     private LocationCallback callback;
     private LocationListener nativeListener;
 
@@ -44,20 +45,25 @@ public class GpsManager {
         } catch (Exception ignored) {}
         this.fused = f;
         this.locMgr = (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE);
-        init();
+        initCallback();
     }
 
-    private void init() {
+    private void initCallback() {
         callback = new LocationCallback() {
             @Override
             public void onLocationResult(@NonNull LocationResult result) {
-                Location loc = result.getLastLocation();
-                if (loc != null) lastLocation = loc;
+                for (Location loc : result.getLocations()) {
+                    if (loc != null) {
+                        lastLocation = loc;
+                        return;
+                    }
+                }
             }
         };
 
-        if (!hasPermission()) return;
-        fetchLastLocation();
+        if (hasPermission()) {
+            fetchLastLocation();
+        }
     }
 
     private void fetchLastLocation() {
@@ -69,30 +75,30 @@ public class GpsManager {
                 fused.getLastLocation()
                     .addOnSuccessListener(loc -> {
                         if (loc != null) lastLocation = loc;
-                        else fallback();
+                        else nativeCached();
                     })
-                    .addOnFailureListener(e -> fallback());
+                    .addOnFailureListener(e -> nativeCached());
             } else {
-                fallback();
+                nativeCached();
             }
         } catch (Exception e) {
-            fallback();
+            nativeCached();
         }
     }
 
-    // Fallback to native LocationManager on non-GMS devices
-    private void fallback() {
+    private void nativeCached() {
         if (locMgr == null) return;
-
         try {
+            Location best = null;
             if (locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 Location loc = locMgr.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-                if (loc != null) { lastLocation = loc; return; }
+                if (loc != null) best = loc;
             }
-            if (locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            if (best == null && locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 Location loc = locMgr.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-                if (loc != null) { lastLocation = loc; return; }
+                if (loc != null) best = loc;
             }
+            if (best != null) lastLocation = best;
         } catch (SecurityException ignored) {}
     }
 
@@ -111,7 +117,11 @@ public class GpsManager {
                locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
     }
 
-    public void requestSingle() {
+    public boolean hasCachedLocation() {
+        return lastLocation != null;
+    }
+
+    public void requestSingle(AtomicReference<Location> outLocation) {
         if (!hasPermission()) return;
 
         MainService svc = MainService.getInstance();
@@ -119,8 +129,11 @@ public class GpsManager {
             svc.updateType(android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
         }
 
-        if (!requestFusedSingle()) {
-            requestNativeSingle();
+        boolean fusedStarted = requestFusedSingle();
+        boolean nativeStarted = requestNativeSingle();
+
+        if (outLocation != null && lastLocation != null) {
+            outLocation.set(lastLocation);
         }
     }
 
@@ -129,14 +142,12 @@ public class GpsManager {
         try {
             LocationRequest req = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000)
                 .setMinUpdateIntervalMillis(2000)
-                .setWaitForAccurateLocation(true)
                 .setMaxUpdates(1)
                 .build();
 
             fused.requestLocationUpdates(req, callback, Looper.getMainLooper());
             return true;
         } catch (SecurityException e) {
-            // Fall back to balanced accuracy if high accuracy is denied
             try {
                 LocationRequest req = new LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 10000)
                     .setMinUpdateIntervalMillis(5000)
@@ -152,8 +163,8 @@ public class GpsManager {
         }
     }
 
-    private void requestNativeSingle() {
-        if (locMgr == null) return;
+    private boolean requestNativeSingle() {
+        if (locMgr == null) return false;
 
         nativeListener = new LocationListener() {
             @Override
@@ -169,14 +180,18 @@ public class GpsManager {
             public void onProviderEnabled(@NonNull String provider) {}
         };
 
+        boolean started = false;
         try {
             if (locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locMgr.requestSingleUpdate(LocationManager.GPS_PROVIDER, nativeListener, Looper.getMainLooper());
+                started = true;
             }
             if (locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locMgr.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, nativeListener, Looper.getMainLooper());
+                started = true;
             }
         } catch (SecurityException ignored) {}
+        return started;
     }
 
     private void removeNativeListener() {
@@ -228,17 +243,15 @@ public class GpsManager {
     public JSONObject getData() {
         JSONObject data = new JSONObject();
         try {
-            if (lastLocation != null) {
+            Location loc = lastLocation;
+            if (loc != null) {
                 data.put(Protocol.KEY_ENABLED, true);
-                data.put(Protocol.KEY_LATITUDE, lastLocation.getLatitude());
-                data.put(Protocol.KEY_LONGITUDE, lastLocation.getLongitude());
-                data.put(Protocol.KEY_ACCURACY, lastLocation.getAccuracy());
-                data.put(Protocol.KEY_SPEED, lastLocation.getSpeed());
-                data.put(Protocol.KEY_PROVIDER, lastLocation.getProvider());
-                // Send ISO 8601 string instead of epoch millis for proper display
-                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
-                sdf.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
-                data.put(Protocol.KEY_TIMESTAMP, sdf.format(new java.util.Date(lastLocation.getTime())));
+                data.put(Protocol.KEY_LATITUDE, loc.getLatitude());
+                data.put(Protocol.KEY_LONGITUDE, loc.getLongitude());
+                data.put(Protocol.KEY_ACCURACY, (double) loc.getAccuracy());
+                data.put(Protocol.KEY_SPEED, (double) loc.getSpeed());
+                data.put(Protocol.KEY_PROVIDER, loc.getProvider() != null ? loc.getProvider() : "unknown");
+                data.put(Protocol.KEY_TIMESTAMP, loc.getTime());
             } else {
                 data.put(Protocol.KEY_ENABLED, false);
                 data.put(Protocol.KEY_ERROR, "No location");
@@ -246,7 +259,7 @@ public class GpsManager {
         } catch (Exception e) {
             try {
                 data.put(Protocol.KEY_ENABLED, false);
-                data.put(Protocol.KEY_ERROR, e.getMessage());
+                data.put(Protocol.KEY_ERROR, e.getMessage() != null ? e.getMessage() : "Unknown error");
             } catch (Exception ignored) {}
         }
         return data;
