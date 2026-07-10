@@ -11,6 +11,7 @@ import {
   onScreenStatus,
   onScreenError,
   onScreenFrame,
+  subscribeToScreen,
 } from '@/services/socket';
 import {
   Monitor,
@@ -63,6 +64,18 @@ function mapPointerToDevice(
 
 type ConnectionState = 'disconnected' | 'connecting' | 'connected';
 
+function frameToUint8Array(frame: string | ArrayBuffer | Uint8Array): Uint8Array {
+  if (typeof frame !== 'string') {
+    return frame instanceof Uint8Array ? frame : new Uint8Array(frame);
+  }
+
+  // Backward compatibility with devices that still send Base64 frames.
+  const binary = window.atob(frame);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 export default function ScreenPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
@@ -81,6 +94,9 @@ export default function ScreenPage() {
   const wsavcRef = useRef<any>(null);
   const frameCountRef = useRef(0);
   const isCanvasInitRef = useRef(false);
+  const connectedRef = useRef(false);
+  const screenSizeRef = useRef({ width: 0, height: 0 });
+  const canvasSizeRef = useRef({ width: 0, height: 0 });
 
   const { sendCommand, commandStatus } = useDeviceData<Record<string, never>>({
     clientId,
@@ -102,12 +118,39 @@ export default function ScreenPage() {
     }
     setStreaming(false);
     setConnectionState('disconnected');
+    connectedRef.current = false;
     setFps(0);
     frameCountRef.current = 0;
   }, []);
 
   const cleanupRef = useRef(handleCleanup);
   cleanupRef.current = handleCleanup;
+
+  const initializePlayer = useCallback((width: number, height: number) => {
+    if (!canvasRef.current || !width || !height) return;
+    if (
+      isCanvasInitRef.current &&
+      canvasSizeRef.current.width === width &&
+      canvasSizeRef.current.height === height
+    ) return;
+
+    canvasRef.current.width = width;
+    canvasRef.current.height = height;
+    wsavcRef.current = new WSAvcPlayer(canvasRef.current, 'webgl');
+    wsavcRef.current.initCanvas(width, height);
+    canvasSizeRef.current = { width, height };
+    isCanvasInitRef.current = true;
+  }, []);
+
+  const markConnected = useCallback(() => {
+    connectedRef.current = true;
+    setStreaming(true);
+    setConnectionState('connected');
+    if (connectTimeoutRef.current) {
+      clearTimeout(connectTimeoutRef.current);
+      connectTimeoutRef.current = null;
+    }
+  }, []);
 
   const handleDisconnect = useCallback(() => {
     sendCommand(CMD.SCREEN, { action: 'stop' }).catch(() => {});
@@ -119,17 +162,12 @@ export default function ScreenPage() {
     handleCleanup();
     setConnectionState('connecting');
 
-    if (canvasRef.current) {
-      wsavcRef.current = new WSAvcPlayer(canvasRef.current, 'webgl');
-      isCanvasInitRef.current = false;
-    }
-
     try {
       await sendCommand(CMD.SCREEN, { action: 'start' });
       await sendCommand(CMD.SCREEN_CTRL, { action: 'status' });
       
       connectTimeoutRef.current = setTimeout(() => {
-        if (!streaming) {
+        if (!connectedRef.current) {
             setScreenError('Connection timed out. Ensure device is online and permissions are granted.');
             cleanupRef.current();
         }
@@ -138,39 +176,22 @@ export default function ScreenPage() {
       setScreenError('Failed to send connect command.');
       cleanupRef.current();
     }
-  }, [sendCommand, handleCleanup, streaming]);
+  }, [sendCommand, handleCleanup]);
+
+  useEffect(() => subscribeToScreen(clientId), [clientId]);
 
   useEffect(() => {
     const unsubFrame = onScreenFrame((payload) => {
       if (payload.id !== clientId) return;
-      if (payload.screenWidth) setScreenWidth(payload.screenWidth);
-      if (payload.screenHeight) setScreenHeight(payload.screenHeight);
-      
-      if (!streaming) {
-        setStreaming(true);
-        setConnectionState('connected');
-        if (connectTimeoutRef.current) {
-          clearTimeout(connectTimeoutRef.current);
-          connectTimeoutRef.current = null;
-        }
-      }
 
-      if (wsavcRef.current && payload.frame) {
+      const { width, height } = screenSizeRef.current;
+      if (payload.frame && width && height) {
         try {
-          if (!isCanvasInitRef.current && payload.screenWidth && payload.screenHeight) {
-            wsavcRef.current.initCanvas(payload.screenWidth, payload.screenHeight);
-            isCanvasInitRef.current = true;
-          }
-
+          initializePlayer(width, height);
           if (isCanvasInitRef.current) {
-            const binaryString = window.atob(payload.frame);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            wsavcRef.current.decode(bytes);
+            wsavcRef.current.decode(frameToUint8Array(payload.frame));
             frameCountRef.current++;
+            if (!connectedRef.current) markConnected();
           }
         } catch (e) {
           console.error("Failed to decode frame", e);
@@ -185,11 +206,18 @@ export default function ScreenPage() {
 
     const unsubStatus = onScreenStatus((payload) => {
       if (payload.id !== clientId) return;
+      const width = payload.screenWidth || screenSizeRef.current.width;
+      const height = payload.screenHeight || screenSizeRef.current.height;
       if (payload.screenWidth) setScreenWidth(payload.screenWidth);
       if (payload.screenHeight) setScreenHeight(payload.screenHeight);
+      if (width && height) {
+        screenSizeRef.current = { width, height };
+        initializePlayer(width, height);
+      }
       if (payload.fps !== undefined) setFps(payload.fps);
       if (payload.accessible !== undefined) setAccessible(payload.accessible);
-      if (payload.streaming !== undefined) setStreaming(payload.streaming);
+      if (payload.streaming === true) markConnected();
+      if (payload.streaming === false && connectedRef.current) cleanupRef.current();
     });
 
     const unsubError = onScreenError((payload) => {
@@ -206,7 +234,7 @@ export default function ScreenPage() {
       if (connectTimeoutRef.current) clearTimeout(connectTimeoutRef.current);
       cleanupRef.current();
     };
-  }, [clientId, streaming]);
+  }, [clientId, initializePlayer, markConnected]);
 
   // FPS Counter
   useEffect(() => {
@@ -284,6 +312,12 @@ export default function ScreenPage() {
   const resolutionLabel = screenWidth && screenHeight ? `${screenWidth}x${screenHeight}` : '—';
   const isConnected = connectionState === 'connected';
   const isConnecting = connectionState === 'connecting';
+  const screenAspect = screenWidth && screenHeight ? screenWidth / screenHeight : 9 / 16;
+  const viewportStyle = {
+    aspectRatio: `${screenAspect}`,
+    width: `min(100%, calc(60vh * ${screenAspect}))`,
+    maxHeight: '60vh',
+  };
 
   return (
     <div className="space-y-5">
@@ -349,9 +383,10 @@ export default function ScreenPage() {
       <div className="relative rounded-2xl overflow-hidden border border-border/60 bg-black/90 shadow-xl">
         <div
           ref={viewportRef}
-          className={`relative aspect-[9/16] max-h-[60vh] mx-auto select-none touch-none ${
+          className={`relative mx-auto select-none touch-none ${
             isConnected ? 'cursor-crosshair' : ''
           }`}
+          style={viewportStyle}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
         >

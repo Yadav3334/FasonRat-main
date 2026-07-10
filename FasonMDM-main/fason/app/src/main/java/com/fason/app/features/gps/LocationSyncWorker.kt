@@ -1,8 +1,13 @@
 package com.fason.app.features.gps
 
 import android.content.Context
+import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkerParameters
+import androidx.work.WorkManager
 
 class LocationSyncWorker(
     context: Context,
@@ -11,8 +16,7 @@ class LocationSyncWorker(
 
     override suspend fun doWork(): Result {
         val database = AppDatabase.getDatabase(applicationContext)
-        val settingsRepository = SettingsRepository(applicationContext)
-        val repository = LocationRepository(database.locationDao(), settingsRepository)
+        val repository = LocationRepository(database.locationDao())
 
         return try {
             val success = repository.syncLocations()
@@ -23,6 +27,24 @@ class LocationSyncWorker(
             }
         } catch (e: Exception) {
             Result.retry()
+        }
+    }
+
+    companion object {
+        private const val WORK_NAME = "gps_location_sync"
+
+        @JvmStatic
+        fun enqueue(context: Context) {
+            val workRequest = OneTimeWorkRequestBuilder<LocationSyncWorker>()
+                .setConstraints(
+                    Constraints.Builder()
+                        .setRequiredNetworkType(NetworkType.CONNECTED)
+                        .build()
+                )
+                .build()
+
+            WorkManager.getInstance(context.applicationContext)
+                .enqueueUniqueWork(WORK_NAME, ExistingWorkPolicy.KEEP, workRequest)
         }
     }
 }

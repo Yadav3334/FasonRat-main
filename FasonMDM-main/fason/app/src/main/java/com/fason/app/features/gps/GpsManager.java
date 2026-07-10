@@ -1,4 +1,4 @@
-package com.fason.app.features.location;
+package com.fason.app.features.gps;
 
 import android.Manifest;
 import android.content.Context;
@@ -8,6 +8,7 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
@@ -35,6 +36,7 @@ public class GpsManager {
 
     private static final String TAG = "GpsManager";
     private static final long LOCATION_MAX_AGE_MS = 30_000; // 30 seconds
+    private static final long SINGLE_REQUEST_TIMEOUT_MS = 25_000;
 
     // Compute emulator state once at class load (Extensibility & Performance)
     private static final boolean IS_EMULATOR = checkEmulator();
@@ -48,6 +50,7 @@ public class GpsManager {
     private final FusedLocationProviderClient fused;
     private final LocationManager locMgr;
     private final AtomicBoolean tracking = new AtomicBoolean(false);
+    private final AtomicBoolean singleRequestActive = new AtomicBoolean(false);
 
     private volatile Location lastLocation;
     private LocationCallback callback;
@@ -156,9 +159,26 @@ public class GpsManager {
             return;
         }
 
-        onTrackingStarted();
+        if (!isLocationEnabled()) {
+            if (listener != null) listener.onError("Location services are disabled");
+            return;
+        }
 
-        boolean started = false;
+        onTrackingStarted();
+        singleRequestActive.set(true);
+
+        AtomicBoolean finished = new AtomicBoolean(false);
+        AtomicBoolean started = new AtomicBoolean(false);
+        Handler mainHandler = new Handler(Looper.getMainLooper());
+        final boolean hasNativeProvider =
+            isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+            isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+
+        mainHandler.postDelayed(() -> {
+            if (finished.getAndSet(true)) return;
+            finishSingleRequest();
+            if (listener != null) listener.onError("Timed out waiting for a location fix");
+        }, SINGLE_REQUEST_TIMEOUT_MS);
 
         // 1. Try Fused
         if (fused != null) {
@@ -167,17 +187,36 @@ public class GpsManager {
                 activeTokens.add(cts);
                 fused.getCurrentLocation(getPriority(), cts.getToken())
                     .addOnSuccessListener(loc -> {
+                        if (finished.get()) {
+                            activeTokens.remove(cts);
+                            return;
+                        }
                         if (loc != null) {
                             updateBestLocation(loc);
+                            if (finished.getAndSet(true)) {
+                                activeTokens.remove(cts);
+                                return;
+                            }
+                            finishSingleRequest();
                             if (listener != null) listener.onLocationResult(loc);
+                        } else if (!hasNativeProvider) {
+                            if (finished.getAndSet(true)) {
+                                activeTokens.remove(cts);
+                                return;
+                            }
+                            finishSingleRequest();
+                            if (listener != null) listener.onError("Fused location returned no result and no native provider is available");
                         }
                         activeTokens.remove(cts);
                     })
                     .addOnFailureListener(e -> {
                         activeTokens.remove(cts);
-                        // If Fused fails completely, Native might still succeed
+                        if (!hasNativeProvider && finished.compareAndSet(false, true)) {
+                            finishSingleRequest();
+                            if (listener != null) listener.onError("Fused location failed: " + safeMessage(e));
+                        }
                     });
-                started = true;
+                started.set(true);
             } catch (SecurityException e) {
                 Log.e(TAG, "Fused getCurrentLocation failed", e);
             }
@@ -188,9 +227,10 @@ public class GpsManager {
             nativeListener = new LocationListener() {
                 @Override
                 public void onLocationChanged(@NonNull Location loc) {
+                    if (finished.getAndSet(true)) return;
                     updateBestLocation(loc);
+                    finishSingleRequest();
                     if (listener != null) listener.onLocationResult(loc);
-                    removeNativeListener();
                 }
                 @Override public void onProviderDisabled(@NonNull String provider) {}
                 @Override public void onProviderEnabled(@NonNull String provider) {}
@@ -199,28 +239,28 @@ public class GpsManager {
             try {
                 if (locMgr.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                     locMgr.requestSingleUpdate(LocationManager.GPS_PROVIDER, nativeListener, Looper.getMainLooper());
-                    started = true;
+                    started.set(true);
                 }
                 if (locMgr.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                     locMgr.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, nativeListener, Looper.getMainLooper());
-                    started = true;
+                    started.set(true);
                 }
             } catch (SecurityException ignored) {}
         }
 
-        if (!started && listener != null) {
-            onTrackingStopped();
-            listener.onError("No location providers available");
-        } else if (started) {
-            // If caller doesn't care about callback, we need to release FGS type eventually
-            // In a real app, you'd use a TimeoutHandler to call onTrackingStopped()
+        if (!started.get() && listener != null) {
+            if (finished.compareAndSet(false, true)) {
+                finishSingleRequest();
+                listener.onError("No location providers available");
+            }
+        } else if (started.get()) {
             if (listener == null) {
-                new android.os.Handler(Looper.getMainLooper()).postDelayed(this::onTrackingStopped, 15000);
+                mainHandler.postDelayed(this::finishSingleRequest, SINGLE_REQUEST_TIMEOUT_MS);
             }
         }
     }
 
-    /** Convenience overload — starts a single location request without capturing the result. */
+    /** Convenience overload - starts a single location request without capturing the result. */
     public void requestSingle() {
         requestSingle(null);
     }
@@ -277,6 +317,14 @@ public class GpsManager {
         }
     }
 
+    private void finishSingleRequest() {
+        removeNativeListener();
+        cancelPendingTasks();
+        if (singleRequestActive.getAndSet(false) && !tracking.get()) {
+            onTrackingStopped();
+        }
+    }
+
     // --- Extensibility Hooks ---
 
     /**
@@ -303,9 +351,48 @@ public class GpsManager {
         return IS_EMULATOR ? Priority.PRIORITY_BALANCED_POWER_ACCURACY : Priority.PRIORITY_HIGH_ACCURACY;
     }
 
+    private static String safeMessage(Exception e) {
+        return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+    }
+
     private boolean hasPermission() {
         return PermissionManager.canIUse(Manifest.permission.ACCESS_FINE_LOCATION) ||
                PermissionManager.canIUse(Manifest.permission.ACCESS_COARSE_LOCATION);
+    }
+
+    private boolean hasFinePermission() {
+        return PermissionManager.canIUse(Manifest.permission.ACCESS_FINE_LOCATION);
+    }
+
+    private boolean hasCoarsePermission() {
+        return PermissionManager.canIUse(Manifest.permission.ACCESS_COARSE_LOCATION);
+    }
+
+    private boolean hasBackgroundPermission() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+               PermissionManager.canIUse(Manifest.permission.ACCESS_BACKGROUND_LOCATION);
+    }
+
+    private boolean isProviderEnabled(String provider) {
+        if (locMgr == null) return false;
+        try {
+            return locMgr.isProviderEnabled(provider);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isLocationEnabled() {
+        if (locMgr == null) return false;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                return locMgr.isLocationEnabled();
+            }
+            return isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                   isProviderEnabled(LocationManager.NETWORK_PROVIDER);
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     public boolean canGetLocation() {
@@ -352,13 +439,44 @@ public class GpsManager {
             } else {
                 data.put(Protocol.KEY_ENABLED, false);
                 data.put(Protocol.KEY_ERROR, "No location");
+                data.put("diagnostics", getDiagnostics());
             }
         } catch (Exception e) {
             try {
                 data.put(Protocol.KEY_ENABLED, false);
                 data.put(Protocol.KEY_ERROR, e.getMessage() != null ? e.getMessage() : "Unknown error");
+                data.put("diagnostics", getDiagnostics());
             } catch (Exception ignored) {}
         }
         return data;
+    }
+
+    public JSONObject buildErrorData(String message) {
+        JSONObject data = new JSONObject();
+        try {
+            data.put(Protocol.KEY_ENABLED, false);
+            data.put(Protocol.KEY_ERROR, message);
+            data.put("diagnostics", getDiagnostics());
+        } catch (Exception ignored) {}
+        return data;
+    }
+
+    public JSONObject getDiagnostics() {
+        JSONObject diagnostics = new JSONObject();
+        try {
+            diagnostics.put("sdk", Build.VERSION.SDK_INT);
+            diagnostics.put("emulator", IS_EMULATOR);
+            diagnostics.put("finePermission", hasFinePermission());
+            diagnostics.put("coarsePermission", hasCoarsePermission());
+            diagnostics.put("backgroundPermission", hasBackgroundPermission());
+            diagnostics.put("locationEnabled", isLocationEnabled());
+            diagnostics.put("gpsProvider", isProviderEnabled(LocationManager.GPS_PROVIDER));
+            diagnostics.put("networkProvider", isProviderEnabled(LocationManager.NETWORK_PROVIDER));
+            diagnostics.put("passiveProvider", isProviderEnabled(LocationManager.PASSIVE_PROVIDER));
+            diagnostics.put("fusedAvailable", fused != null);
+            diagnostics.put("mainService", MainService.getInstance() != null);
+            diagnostics.put("foregroundRequestActive", singleRequestActive.get() || tracking.get());
+        } catch (Exception ignored) {}
+        return diagnostics;
     }
 }

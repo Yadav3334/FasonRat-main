@@ -221,6 +221,7 @@ function getPageData(id: string, page: string, client: any) {
         list: Array.isArray(gpsData) ? gpsData : [],
         interval: client.gpsInterval,
         error: gpsError?.error || null,
+        diagnostics: gpsError?.diagnostics || null,
       };
     }
     case 'files': {

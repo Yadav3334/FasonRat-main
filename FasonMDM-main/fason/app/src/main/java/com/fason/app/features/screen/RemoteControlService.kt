@@ -3,8 +3,10 @@ package com.fason.app.features.screen
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
+import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 
 class RemoteControlService : AccessibilityService() {
 
@@ -45,5 +47,25 @@ class RemoteControlService : AccessibilityService() {
         gestureBuilder.addStroke(GestureDescription.StrokeDescription(path, 0, duration))
         dispatchGesture(gestureBuilder.build(), null, null)
         Log.d("RemoteControlService", "Performed swipe from $startX, $startY to $endX, $endY")
+    }
+
+    fun performKey(keyCode: String) {
+        val action = when (keyCode.lowercase()) {
+            "back" -> GLOBAL_ACTION_BACK
+            "home" -> GLOBAL_ACTION_HOME
+            "recents" -> GLOBAL_ACTION_RECENTS
+            else -> return
+        }
+        performGlobalAction(action)
+    }
+
+    fun performText(text: String) {
+        if (text.isEmpty()) return
+        val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return
+        val arguments = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+        focused.recycle()
     }
 }

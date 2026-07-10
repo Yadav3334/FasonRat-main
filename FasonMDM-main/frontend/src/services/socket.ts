@@ -10,9 +10,8 @@ type BuilderProgressListener = (progress: BuilderProgress) => void;
 
 export interface ScreenFramePayload {
   id: string;
-  frame: string;
-  screenWidth?: number;
-  screenHeight?: number;
+  frame: string | ArrayBuffer | Uint8Array;
+  sequence?: number;
 }
 
 export interface ScreenStatusPayload {
@@ -20,9 +19,12 @@ export interface ScreenStatusPayload {
   streaming?: boolean;
   screenWidth?: number;
   screenHeight?: number;
+  densityDpi?: number;
   fps?: number;
   quality?: number;
   accessible?: boolean;
+  codec?: string;
+  frameTransport?: 'binary' | 'base64';
 }
 
 type ScreenFrameListener = (payload: ScreenFramePayload) => void;
@@ -51,6 +53,7 @@ const screenFrameListeners: Set<ScreenFrameListener> = new Set();
 const screenStoppedListeners: Set<ScreenStoppedListener> = new Set();
 const screenStatusListeners: Set<ScreenStatusListener> = new Set();
 const screenErrorListeners: Set<ScreenErrorListener> = new Set();
+const screenSubscriptionCounts: Map<string, number> = new Map();
 const webRtcAnswerListeners: Set<WebRtcAnswerListener> = new Set();
 const webRtcIceListeners: Set<WebRtcIceListener> = new Set();
 
@@ -91,6 +94,11 @@ export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
 
   s.io.on('reconnect_attempt', () => {
     s.auth = { token: getToken() };
+  });
+  s.on('connect', () => {
+    screenSubscriptionCounts.forEach((_count, clientId) => {
+      s.emit('screen:subscribe', { id: clientId });
+    });
   });
   s.on('client:connect', (payload: { id: string; model?: string; ip?: string }) => {
     onDeviceChange?.({ ...payload, online: true });
@@ -190,6 +198,23 @@ export function onScreenStatus(listener: ScreenStatusListener): () => void {
 export function onScreenError(listener: ScreenErrorListener): () => void {
   screenErrorListeners.add(listener);
   return () => { screenErrorListeners.delete(listener); };
+}
+
+/** Subscribe this browser only to the high-bandwidth stream it is displaying. */
+export function subscribeToScreen(clientId: string): () => void {
+  const count = screenSubscriptionCounts.get(clientId) ?? 0;
+  screenSubscriptionCounts.set(clientId, count + 1);
+  if (count === 0) adminSocket?.emit('screen:subscribe', { id: clientId });
+
+  return () => {
+    const next = (screenSubscriptionCounts.get(clientId) ?? 1) - 1;
+    if (next <= 0) {
+      screenSubscriptionCounts.delete(clientId);
+      adminSocket?.emit('screen:unsubscribe', { id: clientId });
+    } else {
+      screenSubscriptionCounts.set(clientId, next);
+    }
+  };
 }
 
 export function onWebRtcAnswer(listener: WebRtcAnswerListener): () => void {

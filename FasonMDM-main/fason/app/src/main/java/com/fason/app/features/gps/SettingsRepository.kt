@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -16,6 +17,7 @@ class SettingsRepository(private val context: Context) {
     companion object {
         val SERVER_URL_KEY = stringPreferencesKey("server_url")
         val IS_TRACKING_KEY = booleanPreferencesKey("is_tracking")
+        val TRACKING_INTERVAL_SECONDS_KEY = intPreferencesKey("tracking_interval_seconds")
     }
 
     val serverUrl: Flow<String> = context.dataStore.data
@@ -28,6 +30,11 @@ class SettingsRepository(private val context: Context) {
             preferences[IS_TRACKING_KEY] ?: false
         }
 
+    val trackingIntervalSeconds: Flow<Int> = context.dataStore.data
+        .map { preferences ->
+            preferences[TRACKING_INTERVAL_SECONDS_KEY] ?: 10
+        }
+
     suspend fun saveServerUrl(url: String) {
         context.dataStore.edit { preferences ->
             preferences[SERVER_URL_KEY] = url
@@ -37,6 +44,12 @@ class SettingsRepository(private val context: Context) {
     suspend fun setTracking(isTracking: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[IS_TRACKING_KEY] = isTracking
+        }
+    }
+
+    suspend fun setTrackingIntervalSeconds(seconds: Int) {
+        context.dataStore.edit { preferences ->
+            preferences[TRACKING_INTERVAL_SECONDS_KEY] = seconds.coerceIn(1, 3600)
         }
     }
 }

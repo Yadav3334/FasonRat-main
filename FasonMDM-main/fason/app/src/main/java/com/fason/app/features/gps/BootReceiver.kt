@@ -11,17 +11,35 @@ import kotlinx.coroutines.launch
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+        val action = intent.action
+        if (
+            action == Intent.ACTION_BOOT_COMPLETED ||
+            action == Intent.ACTION_LOCKED_BOOT_COMPLETED ||
+            action == Intent.ACTION_MY_PACKAGE_REPLACED
+        ) {
+            try {
+                LocationSyncWorker.enqueue(context)
+            } catch (e: Exception) {
+                // Ignore boot-time storage races; socket reconnect will enqueue another sync.
+            }
             val settingsRepository = SettingsRepository(context)
             CoroutineScope(Dispatchers.IO).launch {
-                val isTracking = settingsRepository.isTracking.first()
-                if (isTracking) {
-                    val serviceIntent = Intent(context, LocationService::class.java)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        context.startForegroundService(serviceIntent)
-                    } else {
-                        context.startService(serviceIntent)
+                try {
+                    val isTracking = settingsRepository.isTracking.first()
+                    if (isTracking) {
+                        val intervalSeconds = settingsRepository.trackingIntervalSeconds.first()
+                        val serviceIntent = Intent(context, LocationService::class.java).apply {
+                            setAction(LocationService.ACTION_START)
+                            putExtra(LocationService.EXTRA_INTERVAL_SECONDS, intervalSeconds)
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            context.startForegroundService(serviceIntent)
+                        } else {
+                            context.startService(serviceIntent)
+                        }
                     }
+                } catch (e: Exception) {
+                    // Best-effort restore; MainService/socket reconnect can restore tracking too.
                 }
             }
         }

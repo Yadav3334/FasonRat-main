@@ -26,6 +26,8 @@ const markerIcon = new L.Icon({
   iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
 });
 
+type GpsDiagnostics = Record<string, string | number | boolean | null>;
+
 function AddressDisplay({ lat, lon }: { lat: number; lon: number }) {
   const [address, setAddress] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -65,13 +67,14 @@ export default function GpsPage() {
   const [liveLabel, setLiveLabel] = useState('');
 
   const { data: rawData, loading, error, refresh, sendCommand, commandStatus } = useDeviceData<{
-    locations: GpsLocation[]; interval: number; deviceError: string | null;
+    locations: GpsLocation[]; interval: number; deviceError: string | null; diagnostics: GpsDiagnostics | null;
   }>({
     clientId, page: 'gps',
     extractData: (d) => ({
       locations: extractList<GpsLocation>(d.list).map((loc) => {
         let timeStr = '';
-        const rawTime = (loc as Record<string, unknown>).time ?? (loc as Record<string, unknown>).timestamp;
+        const rawLoc = loc as unknown as Record<string, unknown>;
+        const rawTime = rawLoc.time ?? rawLoc.timestamp;
         if (rawTime) {
           if (typeof rawTime === 'number') timeStr = new Date(rawTime).toLocaleString();
           else if (typeof rawTime === 'string') {
@@ -90,14 +93,18 @@ export default function GpsPage() {
       }),
       interval: typeof d.interval === 'number' ? d.interval : 0,
       deviceError: typeof d.error === 'string' ? d.error : null,
+      diagnostics: d.diagnostics && typeof d.diagnostics === 'object' && !Array.isArray(d.diagnostics)
+        ? d.diagnostics as GpsDiagnostics
+        : null,
     }),
-    dataType: 'gps', defaultValue: { locations: [], interval: 0, deviceError: null },
+    dataType: 'gps', defaultValue: { locations: [], interval: 0, deviceError: null, diagnostics: null },
     socketDebounceMs: 1000,
   });
 
   const locations = rawData.locations;
   const serverInterval = rawData.interval;
   const deviceError = rawData.deviceError;
+  const diagnostics = rawData.diagnostics;
   const displayError = error || deviceError;
 
   useEffect(() => {
@@ -122,7 +129,7 @@ export default function GpsPage() {
   }, [clientId]);
 
   const fetchGps = useCallback(async () => {
-    await sendCommand(CMD.LOCATION);
+    await sendCommand(CMD.LOCATION, { action: 'fetch' });
     setTimeout(refresh, 3000);
     setTimeout(refresh, 8000);
   }, [sendCommand, refresh]);
@@ -152,6 +159,20 @@ export default function GpsPage() {
         refresh={refresh} loading={loading} commandStatus={commandStatus}
       />
       {displayError && <ErrorAlert message={displayError} onRetry={refresh} />}
+      {displayError && diagnostics && (
+        <SectionCard title="GPS Diagnostics" icon={MapPin}>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {Object.entries(diagnostics).map(([key, value]) => (
+              <div key={key} className="rounded-md border bg-muted/30 px-3 py-2">
+                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{key}</p>
+                <p className="mt-1 font-mono text-xs">
+                  {typeof value === 'boolean' ? (value ? 'true' : 'false') : String(value ?? '-')}
+                </p>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      )}
 
       <SectionCard>
         <div className="flex flex-col sm:flex-row sm:items-center gap-2">

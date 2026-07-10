@@ -65,6 +65,7 @@ public final class Protocol {
     public static final String KEY_TO     = "to";
     public static final String KEY_SMS    = "sms";
     public static final String KEY_SEC    = "sec";
+    public static final String KEY_INTERVAL = "interval";
     public static final String KEY_PERM   = "perm";
     public static final String KEY_ID     = "id";
     public static final String KEY_SYS    = "sys";

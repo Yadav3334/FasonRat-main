@@ -22,6 +22,12 @@ class RemoteActionController {
                     val duration = json.optLong("duration", 300)
                     RemoteControlService.instance?.performSwipe(startX, startY, endX, endY, duration)
                 }
+                "key" -> {
+                    RemoteControlService.instance?.performKey(json.optString("keyCode"))
+                }
+                "text" -> {
+                    RemoteControlService.instance?.performText(json.optString("text"))
+                }
                 else -> {
                     Log.w("RemoteActionController", "Unknown action type: ${json.optString("action")}")
                 }
